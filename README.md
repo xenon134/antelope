@@ -1,0 +1,2 @@
+# antelope
+a swift-running deerlike ruminant with smooth hair and upward-pointing horns, of a group native to Africa and Asia that includes the gazelles, impala, gnus, and elands.
