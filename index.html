@@ -21,50 +21,147 @@
       overflow: hidden;
     }
 
-    #terminal {
+    #terminal-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
       width: 100%;
       height: 100%;
+      gap: 2px;
+      background: #333;
+    }
+
+    .terminal-wrapper {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      position: relative;
+      overflow: hidden;
     }
   </style>
 </head>
 
 <body>
-  <div id="terminal"></div>
+  <div id="terminal-container"></div>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 
   <script>
-    const term = new Terminal({
-      convertEol: true,
-      theme: { background: '#000000' },
-      scrollback: 1000,
+    const terminals = {};
+    const fitAddons = {};
+    const container = document.getElementById('terminal-container');
+
+    window.addEventListener('resize', () => {
+      Object.values(fitAddons).forEach(addon => addon.fit());
     });
-
-    // Access the addon from the global window object
-    const fitAddon = new window.FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
-
-    window.addEventListener('resize', () => fitAddon.fit());
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
 
-    term.onData((data) => {
-      // Send raw keystrokes/sequences to the server as bytes
-      ws.send(new TextEncoder().encode(data));
-    });
+    function send(data, metadata = {}) {
+      metadata.Time = new Date().toISOString();
+      let header = "";
+      for (const [k, v] of Object.entries(metadata)) {
+        header += `${k}: ${v}\n`;
+      }
+      header += "\n";
+      const headerBytes = new TextEncoder().encode(header);
+      
+      const payload = new Uint8Array(headerBytes.length + data.length);
+      payload.set(headerBytes, 0);
+      payload.set(data, headerBytes.length);
+      
+      ws.send(payload);
+    }
+
+    function decodeMessage(payload) {
+      const ui8 = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+      
+      let headerEnd = -1;
+      for (let i = 0; i < ui8.length - 1; i++) {
+        if (ui8[i] === 10 && ui8[i+1] === 10) {
+          headerEnd = i;
+          break;
+        }
+      }
+      
+      if (headerEnd === -1) {
+        return { data: ui8, metadata: {} };
+      }
+      
+      const headerBytes = ui8.slice(0, headerEnd);
+      const data = ui8.slice(headerEnd + 2);
+      const headerStr = new TextDecoder().decode(headerBytes);
+      
+      const metadata = {};
+      for (const line of headerStr.split('\n')) {
+        if (line) {
+          const idx = line.indexOf(': ');
+          if (idx !== -1) {
+            const key = line.slice(0, idx);
+            const value = line.slice(idx + 2);
+            metadata[key] = value;
+          }
+        }
+      }
+      
+      return { data, metadata };
+    }
+
+    function createTerminal(terminalID) {
+        if (terminals[terminalID]) return;
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'terminal-wrapper';
+        wrapper.id = `terminal-${terminalID}`;
+        container.appendChild(wrapper);
+
+        const term = new Terminal({
+            convertEol: true,
+            theme: { background: '#000000' },
+            scrollback: 5000,
+        });
+
+        const fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(wrapper);
+        
+        // Let CSS grid layout complete before fitting
+        setTimeout(() => fitAddon.fit(), 50);
+
+        term.onData((data) => {
+            // Send raw keystrokes/sequences to the server as bytes
+            send(new TextEncoder().encode(data), { Type: "Input", TerminalID: terminalID.toString() });
+        });
+
+        terminals[terminalID] = term;
+        fitAddons[terminalID] = fitAddon;
+    }
 
     ws.onmessage = (event) => {
-      const data = event.data instanceof ArrayBuffer
-        ? new Uint8Array(event.data)
-        : event.data;
-      term.write(data);
+      const { data, metadata } = decodeMessage(event.data);
+      console.log("Received metadata:", metadata);
+      
+      if (metadata.Type === "Control") {
+          const controlDataStr = new TextDecoder().decode(data);
+          const controlData = JSON.parse(controlDataStr);
+          if (controlData.action === "openTerminal") {
+              createTerminal(controlData.terminalID);
+          }
+      } else if (metadata.Type === "Output") {
+          const tId = metadata.TerminalID;
+          if (tId !== undefined && terminals[tId]) {
+              terminals[tId].write(data);
+          }
+      }
     };
 
-    ws.onclose = () => term.write('\r\n\r\n[Connection closed]');
-    ws.onerror = () => term.write('\r\n[WebSocket error]');
+    ws.onclose = () => {
+        Object.values(terminals).forEach(term => term.write('\r\n\r\n[Connection closed]'));
+    };
+    ws.onerror = () => {
+        Object.values(terminals).forEach(term => term.write('\r\n[WebSocket error]'));
+    };
   </script>
 </body>
 
