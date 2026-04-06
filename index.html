@@ -114,6 +114,7 @@
         const wrapper = document.createElement('div');
         wrapper.className = 'terminal-wrapper';
         wrapper.id = `terminal-${terminalID}`;
+        wrapper.style.order = terminalID;
         container.appendChild(wrapper);
 
         const term = new Terminal({
@@ -138,6 +139,18 @@
         fitAddons[terminalID] = fitAddon;
     }
 
+    function closeTerminal(terminalID) {
+        if (terminals[terminalID]) {
+            terminals[terminalID].dispose();
+            delete terminals[terminalID];
+            delete fitAddons[terminalID];
+        }
+        const wrapper = document.getElementById(`terminal-${terminalID}`);
+        if (wrapper) {
+            wrapper.remove();
+        }
+    }
+
     ws.onmessage = (event) => {
       const { data, metadata } = decodeMessage(event.data);
       console.log("Received metadata:", metadata);
@@ -147,6 +160,8 @@
           const controlData = JSON.parse(controlDataStr);
           if (controlData.action === "openTerminal") {
               createTerminal(controlData.terminalID);
+          } else if (controlData.action === "closeTerminal") {
+              closeTerminal(controlData.terminalID);
           }
       } else if (metadata.Type === "Output") {
           const tId = metadata.TerminalID;
