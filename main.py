@@ -17,7 +17,7 @@ print('Emergency stop: taskkill -f -pid', os.getpid(), '\n')
 # Configuration
 EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mpeg', '.3gp', '.ts'}
 OUTPUT_DIR = "ultrafast"
-MAX_PARALLEL = 4
+MAX_PARALLEL = 8
 TARGET_DIR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "."
 OUTPUT_PATH = os.path.join(TARGET_DIR, OUTPUT_DIR)
 
@@ -112,6 +112,11 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             
         cmd = get_command(0, filename)
         
+        info_msg = f"\r\n\x1b[38;5;12m--- Starting processing job for {filename} ---\x1b[0m\r\n\r\n".encode("utf-8")
+        terminal_history[slot_id] += info_msg
+        if active_websocket:
+            await send_to_ws(active_websocket, info_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+
         try:
             pty = winpty.PtyProcess.spawn(
                 cmd,
@@ -120,10 +125,10 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             )
             active_terminals[slot_id] = pty
             
-            info_msg = f"--- Processing {filename} ---\r\n\r\n".encode("utf-8")
-            terminal_history[slot_id] += info_msg
+            spawn_msg = f"\x1b[38;5;10m[Spawned winpty process for FFmpeg ID={pty.pid}]\x1b[0m\r\n\r\n".encode("utf-8")
+            terminal_history[slot_id] += spawn_msg
             if active_websocket:
-                await send_to_ws(active_websocket, info_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+                await send_to_ws(active_websocket, spawn_msg, {"Type": "Output", "TerminalID": str(slot_id)})
 
             loop = asyncio.get_running_loop()
             while pty.isalive():
@@ -135,7 +140,8 @@ async def worker(slot_id: int, queue: asyncio.Queue):
                         await send_to_ws(active_websocket, data_bytes, {"Type": "Output", "TerminalID": str(slot_id)})
                         
             # Job finished
-            fin_msg = f"\r\n--- Finished {filename} ---\r\n".encode("utf-8")
+            exit_code = pty.wait()
+            fin_msg = f"\r\n\x1b[38;5;13m--- Finished {filename} with Code={exit_code} ---\x1b[0m\r\n".encode("utf-8")
             terminal_history[slot_id] += fin_msg
             if active_websocket:
                 await send_to_ws(active_websocket, fin_msg, {"Type": "Output", "TerminalID": str(slot_id)})
@@ -180,6 +186,9 @@ async def terminal(websocket: WebSocket) -> None:
     
     global active_websocket
     active_websocket = websocket
+
+    init_payload = json.dumps({"action": "init", "maxParallel": MAX_PARALLEL}).encode("utf-8")
+    await send_to_ws(websocket, init_payload, {"Type": "Control"})
 
     for term_id in list(active_terminals.keys()):
         # Send Control message to open terminal

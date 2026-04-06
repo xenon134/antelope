@@ -21,14 +21,49 @@
       overflow: hidden;
     }
 
+    #app-container {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+    }
+
     #terminal-container {
+      flex: 1;
       display: grid;
       grid-template-columns: 1fr 1fr;
       grid-template-rows: 1fr 1fr;
-      width: 100%;
-      height: 100%;
       gap: 2px;
       background: #333;
+      min-height: 0;
+    }
+
+    #pagination {
+      height: 40px;
+      background: #222;
+      color: #ccc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      font-family: monospace;
+      font-size: 14px;
+      border-top: 2px solid #444;
+    }
+
+    #pagination button {
+      padding: 4px 12px;
+      cursor: pointer;
+      background: #444;
+      color: white;
+      border: 1px solid #666;
+      border-radius: 3px;
+    }
+
+    #pagination button:disabled {
+      background: #222;
+      color: #666;
+      cursor: not-allowed;
     }
 
     .terminal-wrapper {
@@ -42,17 +77,77 @@
 </head>
 
 <body>
-  <div id="terminal-container"></div>
+  <div id="app-container">
+    <div id="terminal-container"></div>
+    <div id="pagination" style="display: none;">
+      <button id="btn-prev">&lt; Prev</button>
+      <span id="page-info">Page 1 / 1</span>
+      <button id="btn-next">Next &gt;</button>
+    </div>
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 
   <script>
     const terminals = {};
     const fitAddons = {};
+    const wrappers = {};
     const container = document.getElementById('terminal-container');
+    
+    let maxParallel = 4;
+    let currentPage = 1;
+    const itemsPerPage = 4;
+
+    function updatePagination() {
+      const totalPages = Math.ceil(maxParallel / itemsPerPage);
+      document.getElementById('page-info').innerText = `Page ${currentPage} / ${totalPages}`;
+      document.getElementById('pagination').style.display = totalPages > 1 ? 'flex' : 'none';
+      
+      document.getElementById('btn-prev').disabled = currentPage === 1;
+      document.getElementById('btn-next').disabled = currentPage === totalPages;
+
+      const startIndex = (currentPage - 1) * itemsPerPage;
+      const endIndex = startIndex + itemsPerPage;
+
+      for (const [id, wrapper] of Object.entries(wrappers)) {
+        const numId = parseInt(id);
+        if (numId >= startIndex && numId < endIndex) {
+          wrapper.style.display = 'block';
+        } else {
+          wrapper.style.display = 'none';
+        }
+      }
+
+      // Need to refit visible terminals
+      setTimeout(() => {
+        Object.entries(fitAddons).forEach(([id, addon]) => {
+          const numId = parseInt(id);
+          if (numId >= startIndex && numId < endIndex) {
+            try { addon.fit(); } catch (e) {}
+          }
+        });
+      }, 50);
+    }
+
+    document.getElementById('btn-prev').addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage--;
+        updatePagination();
+      }
+    });
+
+    document.getElementById('btn-next').addEventListener('click', () => {
+      const totalPages = Math.ceil(maxParallel / itemsPerPage);
+      if (currentPage < totalPages) {
+        currentPage++;
+        updatePagination();
+      }
+    });
 
     window.addEventListener('resize', () => {
-      Object.values(fitAddons).forEach(addon => addon.fit());
+      Object.values(fitAddons).forEach(addon => {
+          try { addon.fit(); } catch(e) {}
+      });
     });
 
     const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -116,6 +211,7 @@
         wrapper.id = `terminal-${terminalID}`;
         wrapper.style.order = terminalID;
         container.appendChild(wrapper);
+        wrappers[terminalID] = wrapper;
 
         const term = new Terminal({
             convertEol: true,
@@ -127,9 +223,6 @@
         term.loadAddon(fitAddon);
         term.open(wrapper);
         
-        // Let CSS grid layout complete before fitting
-        setTimeout(() => fitAddon.fit(), 50);
-
         term.onData((data) => {
             // Send raw keystrokes/sequences to the server as bytes
             send(new TextEncoder().encode(data), { Type: "Input", TerminalID: terminalID.toString() });
@@ -137,6 +230,8 @@
 
         terminals[terminalID] = term;
         fitAddons[terminalID] = fitAddon;
+        
+        updatePagination();
     }
 
     function closeTerminal(terminalID) {
@@ -144,6 +239,7 @@
             terminals[terminalID].dispose();
             delete terminals[terminalID];
             delete fitAddons[terminalID];
+            delete wrappers[terminalID];
         }
         const wrapper = document.getElementById(`terminal-${terminalID}`);
         if (wrapper) {
@@ -158,7 +254,10 @@
       if (metadata.Type === "Control") {
           const controlDataStr = new TextDecoder().decode(data);
           const controlData = JSON.parse(controlDataStr);
-          if (controlData.action === "openTerminal") {
+          if (controlData.action === "init") {
+              maxParallel = controlData.maxParallel;
+              updatePagination();
+          } else if (controlData.action === "openTerminal") {
               createTerminal(controlData.terminalID);
           } else if (controlData.action === "closeTerminal") {
               closeTerminal(controlData.terminalID);
