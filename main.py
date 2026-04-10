@@ -75,7 +75,7 @@ def decode_message(payload: bytes) -> tuple[bytes, dict]:
 
 active_terminals = {}
 terminal_history = {}
-active_websocket = None
+active_websockets = set()
 ws_lock = asyncio.Lock()
 
 
@@ -91,8 +91,23 @@ async def send_to_ws(websocket: WebSocket, data: bytes, metadata: dict = None):
             pass
 
 
+async def broadcast(data: bytes, metadata: dict = None):
+    if metadata is None:
+        metadata = {}
+    metadata["Time"] = datetime.now().isoformat()
+    msg = encode_message(data, metadata)
+    async with ws_lock:
+        disconnected = []
+        for ws in active_websockets:
+            try:
+                await ws.send_bytes(msg)
+            except Exception:
+                disconnected.append(ws)
+        for ws in disconnected:
+            active_websockets.discard(ws)
+
+
 async def worker(slot_id: int, queue: asyncio.Queue):
-    global active_websocket
     while True:
         try:
             filename = queue.get_nowait()
@@ -101,21 +116,18 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             
         if slot_id in active_terminals:
             # Clear previous visual terminal if we are reusing this slot for a new job
-            if active_websocket:
-                await send_to_ws(active_websocket, json.dumps({"action": "closeTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
+            await broadcast(json.dumps({"action": "closeTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
                 
         active_terminals[slot_id] = "starting"
         terminal_history[slot_id] = bytearray()
         
-        if active_websocket:
-            await send_to_ws(active_websocket, json.dumps({"action": "openTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
+        await broadcast(json.dumps({"action": "openTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
             
         cmd = get_command(0, filename)
         
         info_msg = f"\r\n\x1b[38;5;12m--- Starting processing job for {filename} ---\x1b[0m\r\n\r\n".encode("utf-8")
         terminal_history[slot_id] += info_msg
-        if active_websocket:
-            await send_to_ws(active_websocket, info_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+        await broadcast(info_msg, {"Type": "Output", "TerminalID": str(slot_id)})
 
         try:
             pty = winpty.PtyProcess.spawn(
@@ -127,8 +139,7 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             
             spawn_msg = f"\x1b[38;5;10m[Spawned winpty process for FFmpeg ID={pty.pid}]\x1b[0m\r\n\r\n".encode("utf-8")
             terminal_history[slot_id] += spawn_msg
-            if active_websocket:
-                await send_to_ws(active_websocket, spawn_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+            await broadcast(spawn_msg, {"Type": "Output", "TerminalID": str(slot_id)})
 
             loop = asyncio.get_running_loop()
             while pty.isalive():
@@ -136,21 +147,18 @@ async def worker(slot_id: int, queue: asyncio.Queue):
                 if data:
                     data_bytes = data if isinstance(data, bytes) else data.encode("utf-8")
                     terminal_history[slot_id] += data_bytes
-                    if active_websocket:
-                        await send_to_ws(active_websocket, data_bytes, {"Type": "Output", "TerminalID": str(slot_id)})
+                    await broadcast(data_bytes, {"Type": "Output", "TerminalID": str(slot_id)})
                         
             # Job finished
             exit_code = pty.wait()
             fin_msg = f"\r\n\x1b[38;5;13m--- Finished {filename} with Code={exit_code} ---\x1b[0m\r\n".encode("utf-8")
             terminal_history[slot_id] += fin_msg
-            if active_websocket:
-                await send_to_ws(active_websocket, fin_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+            await broadcast(fin_msg, {"Type": "Output", "TerminalID": str(slot_id)})
                 
         except Exception as e:
             err_msg = f"\r\n[Error: {e}]\r\n".encode("utf-8")
             terminal_history[slot_id] += err_msg
-            if active_websocket:
-                await send_to_ws(active_websocket, err_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+            await broadcast(err_msg, {"Type": "Output", "TerminalID": str(slot_id)})
             if slot_id in active_terminals:
                 del active_terminals[slot_id]
 
@@ -184,8 +192,7 @@ async def index() -> FileResponse:
 async def terminal(websocket: WebSocket) -> None:
     await websocket.accept()
     
-    global active_websocket
-    active_websocket = websocket
+    active_websockets.add(websocket)
 
     init_payload = json.dumps({"action": "init", "maxParallel": MAX_PARALLEL}).encode("utf-8")
     await send_to_ws(websocket, init_payload, {"Type": "Control"})
@@ -218,10 +225,7 @@ async def terminal(websocket: WebSocket) -> None:
                             except TypeError:
                                 pty.write(data.decode("utf-8"))
     except (WebSocketDisconnect, ConnectionResetError):
-        pass
-    finally:
-        if active_websocket == websocket:
-            active_websocket = None
+        active_websockets.discard(websocket)
 
 
 if __name__ == "__main__":
