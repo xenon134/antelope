@@ -46,6 +46,7 @@ def decode_message(payload: bytes) -> tuple[bytes, dict]:
 
 active_terminals = {}
 terminal_history = {}
+terminal_titles = {}
 active_websockets = set()
 ws_lock = asyncio.Lock()
 
@@ -112,10 +113,14 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             )
             active_terminals[slot_id] = pty
             
+            title = '[%d] %s' % (pty.pid, job.displayname)
+            terminal_titles[slot_id] = title
+
             spawn_msg = f"\x1b[38;5;10m[Spawned winpty process PID={pty.pid} for {job.displayname}]\x1b[0m\r\n\r\n".encode("utf-8")
             terminal_history[slot_id] += spawn_msg
             await broadcast(spawn_msg, {"Type": "Output", "TerminalID": str(slot_id)})
-            await broadcast_controlmsg({"action": "setTermTitle", "terminalID": slot_id, "title": '[%d] %s' % (pty.pid, job.displayname)})
+            await broadcast_controlmsg({"action": "setTermTitle", "terminalID": slot_id, "title": title})
+            print('sent title message')
 
             loop = asyncio.get_running_loop()
             while pty.isalive():
@@ -169,6 +174,11 @@ async def terminal(websocket: WebSocket) -> None:
         control_payload = json.dumps({"action": "openTerminal", "terminalID": term_id}).encode("utf-8")
         await send_to_ws(websocket, control_payload, {"Type": "Control"})
         
+        # Re-send the title if it exists
+        if term_id in terminal_titles:
+            title_payload = json.dumps({"action": "setTermTitle", "terminalID": term_id, "title": terminal_titles[term_id]}).encode("utf-8")
+            await send_to_ws(websocket, title_payload, {"Type": "Control"})
+
         # Send history
         history = terminal_history.get(term_id)
         if history:

@@ -51,11 +51,6 @@ def get_jobs(args):
     for filename in filenames:
         full_path = os.path.join(TARGET_DIR, filename)
         if os.path.isfile(full_path) and any(filename.lower().endswith(ext) for ext in EXTENSIONS):
-            print(TARGET_DIR)
-            print(filename)
-            print(full_path)
-            print(get_command(full_path))
-            # assert False
             command = get_command(full_path)
             yield Job(get_command=lambda: command,
                 displayname=os.path.basename(full_path))

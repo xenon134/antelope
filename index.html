@@ -26,16 +26,16 @@
       flex-direction: column;
       width: 100%;
       height: 100%;
+      min-width: 727px;
     }
 
     #terminal-container {
       flex: 1;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: 1fr 1fr;
-      gap: 2px;
+      display: flex;
+      flex-direction: column;
       background: #333;
       min-height: 0;
+      gap: 8px;
     }
 
     #pagination {
@@ -92,11 +92,12 @@
     const terminals = {};
     const fitAddons = {};
     const wrappers = {};
+    const rows = {};
     const container = document.getElementById('terminal-container');
     
     let maxParallel = 4;
     let currentPage = 1;
-    const itemsPerPage = 4;
+    const itemsPerPage = 12;
 
     function updatePagination() {
       const totalPages = Math.ceil(maxParallel / itemsPerPage);
@@ -109,12 +110,12 @@
       const startIndex = (currentPage - 1) * itemsPerPage;
       const endIndex = startIndex + itemsPerPage;
 
-      for (const [id, wrapper] of Object.entries(wrappers)) {
+      for (const [id, row] of Object.entries(rows)) {
         const numId = parseInt(id);
         if (numId >= startIndex && numId < endIndex) {
-          wrapper.style.display = 'block';
+          row.style.display = 'flex';
         } else {
-          wrapper.style.display = 'none';
+          row.style.display = 'none';
         }
       }
 
@@ -206,11 +207,35 @@
     function createTerminal(terminalID) {
         if (terminals[terminalID]) return;
 
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.width = '100%';
+        row.style.flex = '1';
+        row.style.minHeight = '0';
+
+        const titleDiv = document.createElement('div');
+        titleDiv.textContent = `Terminal ${terminalID + 1}`;
+        titleDiv.style.flex = '1';
+        titleDiv.style.padding = '5px';
+        titleDiv.style.background = '#222';
+        titleDiv.style.color = '#ccc';
+        titleDiv.style.display = 'flex';
+        titleDiv.style.alignItems = 'center';
+        titleDiv.style.justifyContent = 'center';
+        // titleDiv.style.fontFamily = 'monospace';
+        titleDiv.style.fontSize = '14px';
+
         const wrapper = document.createElement('div');
         wrapper.className = 'terminal-wrapper';
-        wrapper.id = `terminal-${terminalID}`;
-        wrapper.style.order = terminalID;
-        container.appendChild(wrapper);
+        wrapper.style.flex = '1';
+        wrapper.style.height = '100%';
+        wrapper.style.minHeight = '0';
+
+        row.appendChild(titleDiv);
+        row.appendChild(wrapper);
+        container.appendChild(row);
+
+        rows[terminalID] = row;
         wrappers[terminalID] = wrapper;
 
         const term = new Terminal({
@@ -240,20 +265,22 @@
             delete terminals[terminalID];
             delete fitAddons[terminalID];
             delete wrappers[terminalID];
+            delete rows[terminalID];
         }
-        const wrapper = document.getElementById(`terminal-${terminalID}`);
-        if (wrapper) {
-            wrapper.remove();
+        const row = rows[terminalID];
+        if (row) {
+            row.remove();
         }
     }
 
     ws.onmessage = (event) => {
       const { data, metadata } = decodeMessage(event.data);
-      console.log("Received metadata:", metadata);
+      // console.log("Received metadata:", metadata);
       
       if (metadata.Type === "Control") {
           const controlDataStr = new TextDecoder().decode(data);
           const controlData = JSON.parse(controlDataStr);
+          console.log("Received control message:", metadata, controlData.action);
           if (controlData.action === "init") {
               maxParallel = controlData.maxParallel;
               updatePagination();
@@ -261,13 +288,20 @@
               createTerminal(controlData.terminalID);
           } else if (controlData.action === "closeTerminal") {
               closeTerminal(controlData.terminalID);
-          }
+          } else if (controlData.action === "setTermTitle") {
+            const row = rows[controlData.terminalID];
+            console.log(row);
+            if (row) {
+              const titleDiv = row.querySelector('div');
+              titleDiv.textContent = controlData.title;
+            }
+          } else console.log("Unknown control action:", controlData.action);
       } else if (metadata.Type === "Output") {
           const tId = metadata.TerminalID;
           if (tId !== undefined && terminals[tId]) {
               terminals[tId].write(data);
           }
-      }
+      } else console.log("Unknown message type:", metadata.Type);
     };
 
     ws.onclose = () => {
