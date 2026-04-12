@@ -10,41 +10,12 @@ import winpty
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+import antelope_jobs
 
-DEBUG_MODE = False
+DEBUG_MODE = antelope_jobs.DEBUG_MODE
 print('Emergency stop: taskkill -f -pid', os.getpid(), '\n')
 
-# Configuration
-EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mpeg', '.3gp', '.ts'}
-OUTPUT_DIR = "ultrafast"
 MAX_PARALLEL = 8
-TARGET_DIR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "."
-OUTPUT_PATH = os.path.join(TARGET_DIR, OUTPUT_DIR)
-
-# ffmpeg -threads 1 -i %INPUT% -map 0 -vf scale=1366:768:flags=lanczos -c:v libx264 -crf 23 -preset ultrafast -c:a copy -c:s copy %OUT%
-get_command = lambda port, input_path: [
-    "ffmpeg.bat",
-    "-threads", "1",
-    *(("-to", "10") if DEBUG_MODE else ()),  # only the first 10 seconds
-    "-i", input_path, "-map", "0",
-    "-vf", "scale=1366:768:flags=lanczos",
-    "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-    "-c:a", "copy", "-c:s", "copy", "-y",
-    os.path.join(OUTPUT_PATH, os.path.basename(input_path))
-]
-
-# # ffmpeg -threads 1 -i %INPUT% -map 0 -pix_fmt yuv420p -c:v h264_nvenc -rc vbr -cq 23 -preset p1 -c:a copy -c:s copy %OUTPUT%
-# get_command = lambda port, input_path: [
-#     "ffmpeg.bat",
-#     "-threads", "1",
-#     *(("-to", "10") if DEBUG_MODE else ()),  # only the first 10 seconds
-#     "-i", input_path, "-map", "0",
-#     "-vf", "scale=1366:768:flags=lanczos",
-#     "-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "23",
-#     "-c:a", "copy", "-c:s", "copy", "-y",
-#     os.path.join(OUTPUT_PATH, os.path.basename(input_path))
-# ]
-
 
 env = os.environ.copy()
 env["TERM"] = "xterm-256color"
@@ -107,25 +78,29 @@ async def broadcast(data: bytes, metadata: dict = None):
             active_websockets.discard(ws)
 
 
+async def broadcast_controlmsg(payload):
+    await broadcast(json.dumps(payload).encode("utf-8"), {"Type": "Control"})
+
+
 async def worker(slot_id: int, queue: asyncio.Queue):
     while True:
         try:
-            filename = queue.get_nowait()
+            job = queue.get_nowait()
         except asyncio.QueueEmpty:
             break
             
         if slot_id in active_terminals:
             # Clear previous visual terminal if we are reusing this slot for a new job
-            await broadcast(json.dumps({"action": "closeTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
+            await broadcast_controlmsg({"action": "closeTerminal", "terminalID": slot_id})
                 
         active_terminals[slot_id] = "starting"
         terminal_history[slot_id] = bytearray()
         
-        await broadcast(json.dumps({"action": "openTerminal", "terminalID": slot_id}).encode("utf-8"), {"Type": "Control"})
+        await broadcast_controlmsg({"action": "openTerminal", "terminalID": slot_id})
             
-        cmd = get_command(0, filename)
-        
-        info_msg = f"\r\n\x1b[38;5;12m--- Starting processing job for {filename} ---\x1b[0m\r\n\r\n".encode("utf-8")
+        cmd = job.get_command()
+
+        info_msg = ("\r\n\x1b[38;5;12m >" + ' '.join(cmd) + " \x1b[0m\r\n\r\n").encode("utf-8")
         terminal_history[slot_id] += info_msg
         await broadcast(info_msg, {"Type": "Output", "TerminalID": str(slot_id)})
 
@@ -137,9 +112,10 @@ async def worker(slot_id: int, queue: asyncio.Queue):
             )
             active_terminals[slot_id] = pty
             
-            spawn_msg = f"\x1b[38;5;10m[Spawned winpty process for FFmpeg ID={pty.pid}]\x1b[0m\r\n\r\n".encode("utf-8")
+            spawn_msg = f"\x1b[38;5;10m[Spawned winpty process PID={pty.pid} for {job.displayname}]\x1b[0m\r\n\r\n".encode("utf-8")
             terminal_history[slot_id] += spawn_msg
             await broadcast(spawn_msg, {"Type": "Output", "TerminalID": str(slot_id)})
+            await broadcast_controlmsg({"action": "setTermTitle", "terminalID": slot_id, "title": '[%d] %s' % (pty.pid, job.displayname)})
 
             loop = asyncio.get_running_loop()
             while pty.isalive():
@@ -151,7 +127,7 @@ async def worker(slot_id: int, queue: asyncio.Queue):
                         
             # Job finished
             exit_code = pty.wait()
-            fin_msg = f"\r\n\x1b[38;5;13m--- Finished {filename} with Code={exit_code} ---\x1b[0m\r\n".encode("utf-8")
+            fin_msg = f"\r\n\x1b[38;5;13m--- Finished {job.displayname} with Code={exit_code} ---\x1b[0m\r\n".encode("utf-8")
             terminal_history[slot_id] += fin_msg
             await broadcast(fin_msg, {"Type": "Output", "TerminalID": str(slot_id)})
                 
@@ -165,20 +141,11 @@ async def worker(slot_id: int, queue: asyncio.Queue):
 
 @app.on_event("startup")
 async def startup_event():
-    os.makedirs(OUTPUT_PATH, exist_ok=True)
     queue = asyncio.Queue()
-    try:
-        filenames = os.listdir(TARGET_DIR)
-    except FileNotFoundError:
-        filenames = []
-        print(f"Directory not found: {TARGET_DIR}")
-        
-    for filename in filenames:
-        full_path = os.path.join(TARGET_DIR, filename)
-        if os.path.isfile(full_path) and any(filename.lower().endswith(ext) for ext in EXTENSIONS):
-            queue.put_nowait(full_path)
+    for job in antelope_jobs.get_jobs(sys.argv[1:]):
+        queue.put_nowait(job)
             
-    print(f"Loaded {queue.qsize()} files from {TARGET_DIR} into the encode queue.")
+    print(f"Loaded {queue.qsize()} jobs into the encode queue.")
     for slot_id in range(MAX_PARALLEL):
         asyncio.create_task(worker(slot_id, queue))
 
